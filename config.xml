@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AppConfig>
+    <Network>
+        <TradeFront>tcp://182.254.243.31:30001</TradeFront>
+        <MarketFront>tcp://182.254.243.31:30011</MarketFront>
+    </Network>
+
+    <Account>
+        <BrokerID>9999</BrokerID>
+        <UserID>240915</UserID>
+        <Password>934919@@li</Password>
+        <AppID>simnow_client_test</AppID>
+        <AuthCode>0000000000000000</AuthCode>
+    </Account>
+
+    <Strategy>
+        <Threshold>4360.0</Threshold>
+        <Instruments>
+            <Instrument>IF2606</Instrument>
+            <Instrument>IF2605</Instrument>
+        </Instruments>
+    </Strategy>
+</AppConfig>
