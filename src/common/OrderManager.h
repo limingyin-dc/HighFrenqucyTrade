@@ -91,6 +91,9 @@ public:
     // 直接访问指定下标的槽位（供 TdEngine 撤单时使用）
     OrderSlot& GetSlot(int idx) { return m_slots[idx]; }
 
+    // 公开解码接口，供 TdEngine::OnRspOrderAction 使用
+    static int DecodeIndexPublic(const char* ref) { return DecodeIndex(ref); }
+
 private:
     std::array<OrderSlot, MAX_ORDERS> m_slots{};
 

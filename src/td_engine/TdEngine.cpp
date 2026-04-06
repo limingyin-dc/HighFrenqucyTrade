@@ -182,8 +182,25 @@ void TdEngine::OnRspOrderInsert(CThostFtdcInputOrderField* p, CThostFtdcRspInfoF
 }
 
 // 报单状态变化：通知 OMS 更新槽位状态，刷新共享内存
+// 撤单成功时额外解冻预估保证金，归还可用资金
 void TdEngine::OnRtnOrder(CThostFtdcOrderField* p) {
     if (!p) return;
+
+    // 撤单成功：解冻当初预估冻结的保证金
+    // 未成交部分 = vol_total - vol_traded
+    if (p->OrderStatus == THOST_FTDC_OST_Canceled) {
+        int unfilled = p->VolumeTotalOriginal - p->VolumeTraded;
+        if (unfilled > 0) {
+            double est = p->LimitPrice * m_account.multiplier
+                         * m_account.margin_ratio * unfilled;
+            m_account.frozen_margin.store(
+                std::max(0.0, m_account.frozen_margin.load() - est));
+            m_account.update_available(est);
+            LOG_INFO("[Td] 撤单解冻保证金: ref=%s 未成=%d 解冻=%.2f",
+                     p->OrderRef, unfilled, est);
+        }
+    }
+
     m_oms.OnOrderUpdate(p);
     UpdateShm();
 }
@@ -227,10 +244,33 @@ void TdEngine::OnRtnTrade(CThostFtdcTradeField* p) {
     QueryAccount(); // 成交后刷新资金
 }
 
-// 撤单失败回报，记录错误日志
-void TdEngine::OnRspOrderAction(CThostFtdcInputOrderActionField*, CThostFtdcRspInfoField* r, int, bool) {
-    if (r && r->ErrorID != 0)
-        LOG_ERROR("[Td] 撤单失败: ErrID=%d Msg=%s", r->ErrorID, r->ErrorMsg);
+// 撤单失败回报：根据错误码区分处理
+// - 订单已成交/已撤销（ErrorID 25/26/30）：直接释放槽位，OMS 不会再收到 OnRtnOrder
+// - 其他错误（如频率超限）：标记 Cancelled 阻止守护线程重复撤单，等 OnRtnOrder 最终回收
+void TdEngine::OnRspOrderAction(CThostFtdcInputOrderActionField* p, CThostFtdcRspInfoField* r, int, bool) {
+    if (!r || r->ErrorID == 0) return;
+
+    LOG_ERROR("[Td] 撤单失败: ErrID=%d Msg=%s", r->ErrorID, r->ErrorMsg);
+    if (!p) return;
+
+    int idx = m_oms.DecodeIndexPublic(p->OrderRef);
+    if (idx < 0) return;
+
+    auto& slot = m_oms.GetSlot(idx);
+
+    // ErrorID 25: 撤单找不到报单（已成交或已撤）
+    // ErrorID 26: 报单已全部成交
+    // ErrorID 30: 报单已撤销
+    // 这三种情况订单已终结，不会再收到 OnRtnOrder，必须主动释放槽位
+    if (r->ErrorID == 25 || r->ErrorID == 26 || r->ErrorID == 30) {
+        LOG_WARN("[Td] 撤单时订单已终结(ErrID=%d)，主动释放槽位 ref=%s",
+                 r->ErrorID, p->OrderRef);
+        slot.state.store(OrderState::Empty, std::memory_order_release);
+    } else {
+        // 其他错误：标记 Cancelled，阻止守护线程下次扫描再次撤单
+        // 槽位由后续 OnRtnOrder 回收
+        slot.state.store(OrderState::Cancelled, std::memory_order_release);
+    }
 }
 
 // 风控前置报单：七道风控检查 → 分配 OMS 槽位 → 预冻结保证金 → 发送限价单

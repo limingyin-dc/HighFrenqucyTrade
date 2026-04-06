@@ -43,6 +43,9 @@ private:
         char   inst_id[32]{};
         double last_price = 0.0;
         int    volume     = 0;
+        // 交易所时间戳，用于乱序/重连去重：HHMMSSmmm（9位整数，单调递增）
+        // 重连后 volume 会归零，单纯靠 volume 去重会误放旧 tick
+        int    update_key = 0; // UpdateTime(HHMMSS) * 1000 + UpdateMillisec
     };
     std::array<LastTick, MAX_INST> m_last_tick{};
 };
