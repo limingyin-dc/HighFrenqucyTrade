@@ -86,17 +86,14 @@ public:
 
     // 风控前置报单：通过风控检查后分配 OMS 槽位，发送限价单
     // 返回 order_ref 字符串，风控拦截或槽位满时返回空字符串
-    // t2_tsc 非零时，统计从策略决策到 ReqOrderInsert 完成的耗时（T2→T3）
     std::string SendOrder(const char* inst, double price, char dir,
-                          char offset = THOST_FTDC_OF_Open, int vol = 1,
-                          uint64_t t2_tsc = 0);
+                          char offset = THOST_FTDC_OF_Open, int vol = 1);
 
     // 撤单：通过撤单频率检查后发送撤单请求
     bool CancelOrder(const OrderSlot& slot);
 
     // 平多仓：上期所规则，优先平昨仓（Close），昨仓不足再平今仓（CloseToday）
-    std::string CloseOrder(const char* inst, double price, int vol,
-                           uint64_t t2_tsc = 0);
+    std::string CloseOrder(const char* inst, double price, int vol);
 
     // 快照式读取指定合约的净多头手数（多头总量 - 空头总量）
     int GetNetLong(const char* inst);

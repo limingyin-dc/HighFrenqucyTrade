@@ -2,11 +2,13 @@
 #include "TdEngine.h"
 #include "TickPool.h"
 #include "Tsc.h"
+#include "Logger.h"
 #include <cstdint>
 #include <array>
 #include <vector>
 #include <string>
 #include <cstring>
+#include <algorithm>
 
 #ifndef LIKELY
   #define LIKELY(x)   __builtin_expect(!!(x), 1)
@@ -26,6 +28,35 @@ namespace PriceUtil {
         return price_int + ticks * tick_size;
     }
 }
+
+// 固定窗口分位数统计器（非热路径，攒满 N 个样本后排序打印）
+// N 必须是编译期常量，无堆分配，适合策略线程内使用
+template<int N = 1000>
+class LatencyStats {
+public:
+    const char* name;
+    explicit LatencyStats(const char* n) : name(n) {}
+
+    // 添加一个样本（纳秒），攒满后自动打印并清空
+    void Add(int64_t ns) {
+        m_buf[m_count++] = ns;
+        if (m_count == N) Flush();
+    }
+
+private:
+    std::array<int64_t, N> m_buf{};
+    int m_count = 0;
+
+    void Flush() {
+        std::sort(m_buf.begin(), m_buf.end());
+        LOG_INFO("[Latency][%s] n=%d  p50=%lldns  p99=%lldns  p999=%lldns",
+                 name, N,
+                 (long long)m_buf[N * 50  / 100],
+                 (long long)m_buf[N * 99  / 100],
+                 (long long)m_buf[N * 999 / 1000]);
+        m_count = 0;
+    }
+};
 
 class Strategy {
 public:
@@ -56,4 +87,7 @@ private:
     int FindInstIdx(const char* inst) const;
 
     void Run();
+
+    // 延迟分位数统计器（每 1000 个样本打印一次 p50/p99/p999）
+    LatencyStats<1000> m_lat_tick2order{"tick收到→报单(T1→T3)"}; // 行情到达→ReqOrderInsert完成
 };
