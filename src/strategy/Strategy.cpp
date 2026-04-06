@@ -71,11 +71,11 @@ void Strategy::Run() {
 
         TickCache& cache = m_cache[idx];
 
-        // 核心去重：量变了或价变了才执行策略逻辑
-        // 量只增不减，直接比不等；价格用整数比较避免浮点精度问题
-        int    cur_vol   = tick.bid_vol[0] + tick.ask_vol[0]; // 用盘口量变化判断
-        double cur_price = tick.last_price;
-        if (LIKELY(cur_vol == cache.volume && cur_price == cache.last_price)) continue;
+        // // 核心去重：量变了或价变了才执行策略逻辑
+        // // 量只增不减，直接比不等；价格用整数比较避免浮点精度问题
+        // int    cur_vol   = tick.bid_vol[0] + tick.ask_vol[0]; // 用盘口量变化判断
+        // double cur_price = tick.last_price;
+        // if (LIKELY(cur_vol == cache.volume && cur_price == cache.last_price)) continue;
 
         cache.volume     = cur_vol;
         cache.last_price = cur_price;
