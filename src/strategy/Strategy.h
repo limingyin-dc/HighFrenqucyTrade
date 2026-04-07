@@ -17,36 +17,31 @@
 
 namespace PriceUtil {
     constexpr int64_t SCALE = 10000;
-
     inline int64_t ToInt(double price) {
         return static_cast<int64_t>(price * SCALE + 0.5);
     }
     inline double ToDouble(int64_t price_int) {
         return static_cast<double>(price_int) / SCALE;
     }
+    // tick_size 单位与 SCALE 一致（整数价格单位）
     inline int64_t AddTick(int64_t price_int, int ticks, int64_t tick_size = 2) {
         return price_int + ticks * tick_size;
     }
 }
 
-// 固定窗口分位数统计器（非热路径，攒满 N 个样本后排序打印）
-// N 必须是编译期常量，无堆分配，适合策略线程内使用
+// 固定窗口分位数统计器
 template<int N = 1000>
 class LatencyStats {
 public:
     const char* name;
     explicit LatencyStats(const char* n) : name(n) {}
-
-    // 添加一个样本（纳秒），攒满后自动打印并清空
     void Add(int64_t ns) {
         m_buf[m_count++] = ns;
         if (m_count == N) Flush();
     }
-
 private:
     std::array<int64_t, N> m_buf{};
     int m_count = 0;
-
     void Flush() {
         std::sort(m_buf.begin(), m_buf.end());
         LOG_INFO("[Latency][%s] n=%d  p50=%lldns  p99=%lldns  p999=%lldns",
@@ -58,36 +53,55 @@ private:
     }
 };
 
+// ============================================================
+// 做市策略
+//
+// 每个合约维护一对挂单（bid + ask），挂在买一/卖一各偏移
+// spread_ticks 档的位置。
+//
+// 每次收到新 tick：
+//   1. 若盘口价格变动，撤掉旧的双边挂单
+//   2. 检查净持仓是否允许继续双边报价
+//   3. 重新挂 bid / ask
+//
+// 风控：
+//   - 净多头 >= max_net_pos 时不挂 bid（不再买）
+//   - 净多头 <= -max_net_pos 时不挂 ask（不再卖）
+//   - 涨跌停时不报价
+// ============================================================
 class Strategy {
 public:
-    Strategy(TdEngine& td, double threshold,
+    Strategy(TdEngine& td, int spread_ticks, int max_net_pos,
              const std::vector<std::string>& instruments);
     void Start(int cpu_core = -1);
 
 private:
-    static constexpr int MAX_LONG_POS   = 5;
-    static constexpr int MAX_INST       = 16;
+    static constexpr int MAX_INST = 16;
 
     TdEngine& m_td;
-    int64_t   m_threshold_int;
+    int       m_spread_ticks; // 单边偏移档数，总价差 = spread_ticks * 2 * tick_size
+    int       m_max_net_pos;  // 单合约最大净持仓（多/空方向各自上限）
 
-    // 合约名→下标映射，固定数组，线性查找，无堆分配
     int  m_inst_count = 0;
     char m_inst_names[MAX_INST][32]{};
 
-    // 去重缓存：按合约下标索引，数组访问 O(1)，无哈希开销
-    // 用成交量变化判断是否有新 tick（量只增不减，直接比不等）
-    struct TickCache {
-        double last_price = 0.0;
-        int    volume     = 0;
+    // 每个合约的做市状态
+    struct MmState {
+        // 当前挂单的 OMS 槽位下标，-1 表示无挂单
+        int bid_slot = -1;
+        int ask_slot = -1;
+        // 上次报价的中间价（整数），用于判断是否需要撤单重报
+        int64_t last_mid = 0;
     };
-    std::array<TickCache, MAX_INST> m_cache{};
+    std::array<MmState, MAX_INST> m_state{};
 
-    // 返回合约下标，未找到返回 -1
-    int FindInstIdx(const char* inst) const;
+    // 撤掉某合约的 bid 或 ask 挂单（通过槽位下标，O(1)）
+    void CancelIfActive(int slot_idx);
+
+    // 核心做市逻辑，每个新 tick 调用一次
+    void OnTick(int idx, const SlimTick& tick, uint64_t t1_tsc);
 
     void Run();
 
-    // 延迟分位数统计器（每 1000 个样本打印一次 p50/p99/p999）
-    LatencyStats<1000> m_lat_tick2order{"tick收到→报单(T1→T3)"}; // 行情到达→ReqOrderInsert完成
+    LatencyStats<1000> m_lat_tick2order{"tick→报单(T1→T3)"};
 };

@@ -3,21 +3,75 @@
 #include <thread>
 #include <pthread.h>
 
-Strategy::Strategy(TdEngine& td, double threshold,
+Strategy::Strategy(TdEngine& td, int spread_ticks, int max_net_pos,
                    const std::vector<std::string>& instruments)
-    : m_td(td), m_threshold_int(PriceUtil::ToInt(threshold)) {
-    m_inst_count = (int)instruments.size();
-    if (m_inst_count > MAX_INST) m_inst_count = MAX_INST;
+    : m_td(td), m_spread_ticks(spread_ticks), m_max_net_pos(max_net_pos) {
+    m_inst_count = std::min((int)instruments.size(), MAX_INST);
     for (int i = 0; i < m_inst_count; ++i) {
         strncpy(m_inst_names[i], instruments[i].c_str(), 31);
         m_inst_names[i][31] = '\0';
     }
 }
 
-int Strategy::FindInstIdx(const char* inst) const {
-    for (int i = 0; i < m_inst_count; ++i)
-        if (strncmp(m_inst_names[i], inst, 31) == 0) return i;
-    return -1;
+// 通过槽位下标直接撤单，O(1)，无字符串解码
+void Strategy::CancelIfActive(int slot_idx) {
+    if (slot_idx < 0) return;
+    auto& slot = m_td.m_oms.GetSlot(slot_idx);
+    int st = slot.state.load(std::memory_order_acquire);
+    if (st == OrderState::Pending || st == OrderState::PartialFilled)
+        m_td.CancelOrder(slot);
+}
+
+void Strategy::OnTick(int idx, const SlimTick& tick, uint64_t t1_tsc) {
+    MmState& ms = m_state[idx];
+    const char* inst = tick.instrument;
+
+    // 涨跌停时不报价
+    if (tick.last_price >= tick.upper_limit || tick.last_price <= tick.lower_limit)
+        return;
+
+    // 用买一卖一中间价作为报价基准
+    double  mid_price = (tick.bid[0] + tick.ask[0]) * 0.5;
+    int64_t mid_int   = PriceUtil::ToInt(mid_price);
+
+    // 中间价没变则不撤单重报
+    if (LIKELY(mid_int == ms.last_mid)) return;
+    ms.last_mid = mid_int;
+
+    // 撤掉旧的双边挂单（O(1) 槽位直接访问）
+    CancelIfActive(ms.bid_slot);
+    CancelIfActive(ms.ask_slot);
+    ms.bid_slot = -1;
+    ms.ask_slot = -1;
+
+    int net = m_td.GetNetLongByIdx(idx);
+
+    constexpr int64_t TICK_SIZE = 2000; // 0.2 点，股指期货最小变动价位
+    int64_t bid_int = PriceUtil::AddTick(mid_int, -m_spread_ticks, TICK_SIZE);
+    int64_t ask_int = PriceUtil::AddTick(mid_int,  m_spread_ticks, TICK_SIZE);
+    double  bid_px  = PriceUtil::ToDouble(bid_int);
+    double  ask_px  = PriceUtil::ToDouble(ask_int);
+
+    // 净多头未达上限时挂 bid
+    if (net < m_max_net_pos) {
+        std::string ref = m_td.SendOrder(inst, bid_px, THOST_FTDC_D_Buy);
+        if (!ref.empty()) {
+            // 直接存槽位下标，后续撤单 O(1)
+            ms.bid_slot = m_td.m_oms.DecodeIndexPublic(ref.c_str());
+            m_lat_tick2order.Add(Tsc::ToNs(Tsc::Now() - t1_tsc));
+            LOG_INFO("[MM] %s BID %.2f slot=%d net=%d", inst, bid_px, ms.bid_slot, net);
+        }
+    }
+
+    // 净空头未达上限时挂 ask
+    if (net > -m_max_net_pos) {
+        std::string ref = m_td.SendOrder(inst, ask_px, THOST_FTDC_D_Sell);
+        if (!ref.empty()) {
+            ms.ask_slot = m_td.m_oms.DecodeIndexPublic(ref.c_str());
+            m_lat_tick2order.Add(Tsc::ToNs(Tsc::Now() - t1_tsc));
+            LOG_INFO("[MM] %s ASK %.2f slot=%d net=%d", inst, ask_px, ms.ask_slot, net);
+        }
+    }
 }
 
 void Strategy::Start(int cpu_core) {
@@ -27,9 +81,9 @@ void Strategy::Start(int cpu_core) {
             CPU_ZERO(&cpuset);
             CPU_SET(cpu_core, &cpuset);
             if (pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset) != 0)
-                LOG_WARN("[Strategy] 绑核失败 core=%d", cpu_core);
+                LOG_WARN("[MM] 绑核失败 core=%d", cpu_core);
             else
-                LOG_INFO("[Strategy] 已绑定到 CPU core %d", cpu_core);
+                LOG_INFO("[MM] 已绑定到 CPU core %d", cpu_core);
         }
         Run();
     });
@@ -53,51 +107,12 @@ void Strategy::Run() {
 
         if (UNLIKELY(!m_td.isReady)) continue;
 
-        // 按合约下标找去重缓存，未订阅的合约直接跳过
-        int idx = FindInstIdx(tick.instrument);
-        if (UNLIKELY(idx < 0)) continue;
+        // inst_idx 由 MdEngine 写入时填好，O(1) 定位，无字符串比较
+        int idx = tick.inst_idx;
+        if (UNLIKELY(idx < 0 || idx >= m_inst_count)) continue;
 
-        TickCache& cache = m_cache[idx];
+        if (UNLIKELY(tick.bid[0] <= 0.0 || tick.ask[0] <= 0.0)) continue;
 
-        // // 核心去重：量变了或价变了才执行策略逻辑
-        // // 量只增不减，直接比不等；价格用整数比较避免浮点精度问题
-        int    cur_vol   = tick.bid_vol[0] + tick.ask_vol[0]; // 用盘口量变化判断
-        double cur_price = tick.last_price;
-        // if (LIKELY(cur_vol == cache.volume && cur_price == cache.last_price)) continue;
-
-        cache.volume     = cur_vol;
-        cache.last_price = cur_price;
-
-        // ---- 策略逻辑 ----
-        int64_t price_int = PriceUtil::ToInt(cur_price);
-        int net_long = m_td.GetNetLong(tick.instrument);
-
-        if (LIKELY(price_int < m_threshold_int) && LIKELY(price_int > 10000)) {
-            if (UNLIKELY(net_long >= MAX_LONG_POS)) {
-                LOG_WARN("[Strategy] %s 持仓已达上限(%d手)", tick.instrument, MAX_LONG_POS);
-            } else {
-                double order_price = PriceUtil::ToDouble(
-                    PriceUtil::AddTick(price_int, 1, 2000));
-                std::string ref = m_td.SendOrder(
-                    tick.instrument, order_price, THOST_FTDC_D_Buy);
-                if (LIKELY(!ref.empty())) {
-                    // T1→T3：tick 收到 → ReqOrderInsert 完成
-                    m_lat_tick2order.Add(Tsc::ToNs(Tsc::Now() - t1_tsc));
-                    LOG_INFO("[Strategy] 开仓 ref=%s", ref.c_str());
-                }
-            }
-        }
-
-        int64_t close_threshold = m_threshold_int * 1005 / 1000;
-        if (LIKELY(price_int > close_threshold) && LIKELY(net_long > 0)) {
-            double close_price = PriceUtil::ToDouble(
-                PriceUtil::AddTick(price_int, -1, 2000));
-            std::string ref = m_td.CloseOrder(tick.instrument, close_price, net_long);
-            if (LIKELY(!ref.empty())) {
-                // T1→T3：tick 收到 → ReqOrderInsert 完成
-                m_lat_tick2order.Add(Tsc::ToNs(Tsc::Now() - t1_tsc));
-                LOG_INFO("[Strategy] 平仓 ref=%s 净多=%d", ref.c_str(), net_long);
-            }
-        }
+        OnTick(idx, tick, t1_tsc);
     }
 }

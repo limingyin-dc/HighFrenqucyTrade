@@ -6,22 +6,21 @@
 // ============================================================
 // SlimTick：从 CThostFtdcDepthMarketDataField（~600字节）中
 // 提取策略真正需要的字段，压缩到 64 字节（一条 cache line）。
-//
-// 涨跌停价一天内不变，不放在这里，由 MdEngine 单独维护。
+// inst_idx：MdEngine 在写入时填入合约下标，策略侧 O(1) 定位，
+//           无需运行时字符串比较。
 // ============================================================
 struct alignas(64) SlimTick {
     char   instrument[32];
     double last_price;
     double upper_limit;
     double lower_limit;
-    // 买一到买五价量
     double bid[5];
     int    bid_vol[5];
-    // 卖一到卖五价量
     double ask[5];
     int    ask_vol[5];
     int    update_ms;
     char   update_time[9];
+    int8_t inst_idx;   // 合约在订阅列表中的下标，-1 表示未知
 };
 
 // 账户资金指标，alignas(64) 独占 cache line 避免 false sharing

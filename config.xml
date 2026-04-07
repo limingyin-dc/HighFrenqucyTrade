@@ -14,10 +14,15 @@
     </Account>
 
     <Strategy>
-        <Threshold>4360.0</Threshold>
+        <Spread>2</Spread>
+        <MaxNetPos>3</MaxNetPos>
         <Instruments>
             <Instrument>IF2606</Instrument>
             <Instrument>IF2605</Instrument>
+            <Instrument>IC2606</Instrument>
+            <Instrument>IC2605</Instrument>
+            <Instrument>IH2606</Instrument>
+            <Instrument>IH2605</Instrument>
         </Instruments>
     </Strategy>
 </AppConfig>

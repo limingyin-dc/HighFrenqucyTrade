@@ -42,7 +42,7 @@ int main() {
 
     TdEngine td;
     MdEngine md;
-    Strategy strategy(td, conf.threshold_price, conf.instruments);
+    Strategy strategy(td, conf.spread_ticks, conf.max_net_pos, conf.instruments);
 
     // 策略线程绑到 core 2，与行情/交易线程隔离
     strategy.Start(2);
@@ -55,7 +55,8 @@ int main() {
                 conf.user_id.c_str(),
                 conf.password.c_str(),
                 conf.app_id.c_str(),
-                conf.auth_code.c_str());
+                conf.auth_code.c_str(),
+                conf.instruments);
     });
     td_thread.detach();
 

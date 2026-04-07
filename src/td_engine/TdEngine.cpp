@@ -21,12 +21,22 @@ TdEngine::~TdEngine() {
 }
 
 // 初始化交易引擎：预热 OMS 内存，创建共享内存，连接 CTP，启动守护线程
+// instruments 按订阅顺序预填持仓槽位，保证 inst_idx 与 MdEngine 侧对齐
 void TdEngine::Init(const char* front, const char* b, const char* u,
-                    const char* p, const char* app, const char* auth) {
+                    const char* p, const char* app, const char* auth,
+                    const std::vector<std::string>& instruments) {
     m_front_str = front;
     m_broker = b; m_user = u; m_pw = p; m_app = app; m_auth = auth;
 
-    m_oms.WarmUp(); // 预热 OMS 槽位物理页
+    // 按订阅列表顺序预初始化持仓槽位，下标与 MdEngine 的 inst_idx 一一对应
+    int n = std::min((int)instruments.size(), MAX_INST);
+    for (int i = 0; i < n; ++i) {
+        snprintf(m_positions[i].name, sizeof(m_positions[i].name),
+                 "%.31s", instruments[i].c_str());
+    }
+    m_inst_count.store(n, std::memory_order_relaxed);
+
+    m_oms.WarmUp();
 
     m_shm = ShmMonitor::Create();
     if (m_shm) {
@@ -384,6 +394,17 @@ int TdEngine::GetNetLong(const char* inst) {
             p.short_td.load(std::memory_order_relaxed));
 }
 
+// 按合约下标直接访问持仓，O(1)，热路径使用
+int TdEngine::GetNetLongByIdx(int inst_idx) {
+    int cnt = m_inst_count.load(std::memory_order_relaxed);
+    if (inst_idx < 0 || inst_idx >= cnt) return 0;
+    auto& p = m_positions[inst_idx].pos;
+    return (p.long_yd.load(std::memory_order_relaxed) +
+            p.long_td.load(std::memory_order_relaxed)) -
+           (p.short_yd.load(std::memory_order_relaxed) +
+            p.short_td.load(std::memory_order_relaxed));
+}
+
 // 创建 CTP TraderApi 实例，注册 SPI 和前置地址，发起连接
 void TdEngine::ConnectApi() {
     m_api = CThostFtdcTraderApi::CreateFtdcTraderApi("./flow/td/");
@@ -412,13 +433,22 @@ void TdEngine::UpdateShm() {
 }
 
 // 按合约名查找持仓槽位，不存在时原子递增 m_inst_count 创建新槽位
+// 注意：Init 已按订阅列表预填槽位，正常情况下不会走到创建分支
 TdEngine::InstPos& TdEngine::GetOrCreateInstPos(const char* name) {
     int cnt = m_inst_count.load(std::memory_order_relaxed);
     for (int i = 0; i < cnt; ++i)
         if (strncmp(m_positions[i].name, name, 31) == 0) return m_positions[i];
+    // 未预填的合约（如订阅外的成交），动态追加
     int idx = m_inst_count.fetch_add(1, std::memory_order_relaxed);
-    snprintf(m_positions[idx].name, sizeof(m_positions[idx].name), "%.31s", name);
-    return m_positions[idx];
+    if (idx < MAX_INST) {
+        snprintf(m_positions[idx].name, sizeof(m_positions[idx].name), "%.31s", name);
+        LOG_WARN("[Td] 未预填合约 %s，动态追加 slot=%d", name, idx);
+        return m_positions[idx];
+    }
+    // 超出上限，回退并返回最后一个槽（防止越界，实际不应发生）
+    m_inst_count.fetch_add(-1, std::memory_order_relaxed);
+    LOG_ERROR("[Td] 持仓槽位已满，无法追加合约 %s", name);
+    return m_positions[MAX_INST - 1];
 }
 
 // 按合约名查找持仓槽位，不存在时返回 nullptr

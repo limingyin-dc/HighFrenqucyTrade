@@ -5,6 +5,7 @@
 #include "OrderManager.h"
 #include "RiskManager.h"
 #include <string>
+#include <vector>
 #include <array>
 #include <atomic>
 #include <thread>
@@ -41,8 +42,10 @@ public:
     ~TdEngine();
 
     // 初始化：预热 OMS 内存，创建共享内存，连接 CTP，启动超时撤单守护线程
+    // instruments 用于预初始化持仓槽位顺序，与 MdEngine 的 inst_idx 对齐
     void Init(const char* front, const char* b, const char* u,
-              const char* p, const char* app, const char* auth);
+              const char* p, const char* app, const char* auth,
+              const std::vector<std::string>& instruments = {});
 
     // ---- CTP 回调 ----
 
@@ -97,6 +100,9 @@ public:
 
     // 快照式读取指定合约的净多头手数（多头总量 - 空头总量）
     int GetNetLong(const char* inst);
+
+    // 按合约下标直接读取净多头（O(1)，热路径使用）
+    int GetNetLongByIdx(int inst_idx);
 
 private:
     CThostFtdcTraderApi* m_api = nullptr;

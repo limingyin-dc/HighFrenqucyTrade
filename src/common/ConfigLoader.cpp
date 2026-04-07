@@ -33,10 +33,13 @@ Config Config::Load(const std::string& filename) {
         conf.auth_code  = acc->FirstChildElement("AuthCode")->GetText();
     }
 
-    // 解析策略参数：价格阈值和订阅合约列表
+    // 解析策略参数
     auto* strat = root->FirstChildElement("Strategy");
     if (strat) {
-        conf.threshold_price = strat->FirstChildElement("Threshold")->DoubleText();
+        auto* sp = strat->FirstChildElement("Spread");
+        conf.spread_ticks = sp ? sp->IntText(2) : 2;
+        auto* mp = strat->FirstChildElement("MaxNetPos");
+        conf.max_net_pos  = mp ? mp->IntText(3) : 3;
         auto* insts = strat->FirstChildElement("Instruments");
         if (insts) {
             for (auto* e = insts->FirstChildElement("Instrument");

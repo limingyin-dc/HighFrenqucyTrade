@@ -22,7 +22,7 @@ public:
     void WarmUp();
 
     // 行情线程：写入数据，递增 write_seq（release 保证数据可见）
-    void Write(const CThostFtdcDepthMarketDataField& p, uint64_t recv_tsc);
+    void Write(const CThostFtdcDepthMarketDataField& p, uint64_t recv_tsc, int8_t inst_idx);
 
     // 策略线程：返回当前写入序号，用于检测是否有新 tick
     uint64_t WriteSeq() const {

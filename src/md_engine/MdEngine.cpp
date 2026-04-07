@@ -81,7 +81,7 @@ void MdEngine::OnRtnDepthMarketData(CThostFtdcDepthMarketDataField* p) {
     last.volume     = p->Volume;
     last.last_price = p->LastPrice;
 
-    g_tick_pool.Write(*p, t1_tsc);
+    g_tick_pool.Write(*p, t1_tsc, (int8_t)idx);
 }
 
 bool MdEngine::IsValid(const CThostFtdcDepthMarketDataField* p) const {
