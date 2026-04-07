@@ -60,3 +60,4 @@ private:
     int      m_cancel_head = 0;                 // 队列头（最旧的记录）
     int      m_cancel_tail = 0;                 // 队列尾（下一个写入位置）
     int      m_cancel_sum  = 0;                 // 当前窗口内的撤单次数
+    };

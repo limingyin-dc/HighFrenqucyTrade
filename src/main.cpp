@@ -39,15 +39,6 @@ int main() {
     // 在系统启动阶段遍历所有关键缓冲区，触发物理页分配和 TLB 加载
     // 避免开盘瞬间触发 Page Fault 导致几毫秒的延迟抖动
     LOG_INFO("[System] 开始内存预热...");
-    g_tick_pool.WarmUp(); // TickPool 1024 槽（约 600KB）
-    {
-        TickIndexQueue warmup_q;
-        warmup_q.WarmUp(); // tick 下标队列缓冲区
-    }
-    LOG_INFO("[System] 内存预热完成");
-
-    // 行情队列：只传递 tick 下标（4 字节），而非整个结构体（~600 字节）
-    TickIndexQueue tickQueue;
 
     TdEngine td;
     MdEngine md;
