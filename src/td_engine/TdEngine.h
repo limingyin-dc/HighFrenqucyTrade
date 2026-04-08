@@ -90,7 +90,8 @@ public:
     // 风控前置报单：通过风控检查后分配 OMS 槽位，发送限价单
     // 返回 order_ref 字符串，风控拦截或槽位满时返回空字符串
     std::string SendOrder(const char* inst, double price, char dir,
-                          char offset = THOST_FTDC_OF_Open, int vol = 1);
+                          char offset = THOST_FTDC_OF_Open, int vol = 1,
+                          bool is_maker = false);
 
     // 撤单：通过撤单频率检查后发送撤单请求
     bool CancelOrder(const OrderSlot& slot);

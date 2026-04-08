@@ -52,20 +52,21 @@ void Strategy::OnTick(int idx, const SlimTick& tick, uint64_t t1_tsc) {
     double  bid_px  = PriceUtil::ToDouble(bid_int);
     double  ask_px  = PriceUtil::ToDouble(ask_int);
 
-    // 净多头未达上限时挂 bid
+    // 净多头未达上限时挂 bid（is_maker=true 跳过单合约挂单数检查）
     if (net < m_max_net_pos) {
-        std::string ref = m_td.SendOrder(inst, bid_px, THOST_FTDC_D_Buy);
+        std::string ref = m_td.SendOrder(inst, bid_px, THOST_FTDC_D_Buy,
+                                         THOST_FTDC_OF_Open, 1, true);
         if (!ref.empty()) {
-            // 直接存槽位下标，后续撤单 O(1)
             ms.bid_slot = m_td.m_oms.DecodeIndexPublic(ref.c_str());
             m_lat_tick2order.Add(Tsc::ToNs(Tsc::Now() - t1_tsc));
             LOG_INFO("[MM] %s BID %.2f slot=%d net=%d", inst, bid_px, ms.bid_slot, net);
         }
     }
 
-    // 净空头未达上限时挂 ask
+    // 净空头未达上限时挂 ask（is_maker=true 跳过单合约挂单数检查）
     if (net > -m_max_net_pos) {
-        std::string ref = m_td.SendOrder(inst, ask_px, THOST_FTDC_D_Sell);
+        std::string ref = m_td.SendOrder(inst, ask_px, THOST_FTDC_D_Sell,
+                                         THOST_FTDC_OF_Open, 1, true);
         if (!ref.empty()) {
             ms.ask_slot = m_td.m_oms.DecodeIndexPublic(ref.c_str());
             m_lat_tick2order.Add(Tsc::ToNs(Tsc::Now() - t1_tsc));

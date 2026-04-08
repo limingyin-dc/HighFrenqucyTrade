@@ -139,9 +139,6 @@ void TdEngine::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField* p, CTho
         if (p->PosiDirection == THOST_FTDC_PD_Long) {
             ip.pos.long_yd.store(p->YdPosition);
             ip.pos.long_td.store(p->TodayPosition);
-            // OpenCost = 均价 × 手数 × 合约乘数，还原均价需除以乘数
-            // 用 PositionCost 而非 OpenCost：PositionCost 含当日浮动盈亏调整，
-            // 更接近当前持仓的真实成本，隔夜持仓精度更高
             int total = p->Position;
             if (total > 0)
                 ip.pos.long_avg_price.store(
@@ -149,13 +146,16 @@ void TdEngine::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField* p, CTho
         } else {
             ip.pos.short_yd.store(p->YdPosition);
             ip.pos.short_td.store(p->TodayPosition);
+            int total = p->Position;
+            if (total > 0)
+                ip.pos.short_avg_price.store(
+                    p->PositionCost / (total * m_account.multiplier));
         }
         LOG_INFO("[Td] 持仓: %s %s 昨=%d 今=%d 均价=%.4f",
             p->InstrumentID,
             p->PosiDirection == THOST_FTDC_PD_Long ? "多" : "空",
             p->YdPosition, p->TodayPosition,
-            p->PosiDirection == THOST_FTDC_PD_Long && p->Position > 0
-                ? p->PositionCost / (p->Position * m_account.multiplier) : 0.0);
+            p->Position > 0 ? p->PositionCost / (p->Position * m_account.multiplier) : 0.0);
     }
     if (bIsLast) { LOG_INFO("[Td] 持仓查询完毕"); UpdateShm(); }
 }
@@ -234,7 +234,7 @@ void TdEngine::OnRtnTrade(CThostFtdcTradeField* p) {
 
     if (p->Direction == THOST_FTDC_D_Buy) {
         if (p->OffsetFlag == THOST_FTDC_OF_Open) {
-            // 买开：增加多头今仓，更新加权均价
+            // 买开：增加多头今仓，更新多头加权均价
             int old_vol = pos.long_td.load();
             pos.long_td.fetch_add(p->Volume);
             int new_vol = pos.long_td.load();
@@ -242,27 +242,32 @@ void TdEngine::OnRtnTrade(CThostFtdcTradeField* p) {
                 pos.long_avg_price.store(
                     (pos.long_avg_price.load() * old_vol + p->Price * p->Volume) / new_vol);
         } else if (p->OffsetFlag == THOST_FTDC_OF_CloseToday) {
-            // 买平今：减少空头今仓，计算平仓盈亏
-            double avg = pos.long_avg_price.load();
+            // 买平今：平掉空头今仓，PnL = (空头均价 - 成交价) * 量 * 乘数
+            double avg = pos.short_avg_price.load();
             m_risk.UpdatePnl((avg - p->Price) * p->Volume * m_account.multiplier);
             pos.short_td.fetch_add(-p->Volume);
         } else {
-            // 买平昨：减少空头昨仓，计算平仓盈亏
-            double avg = pos.long_avg_price.load();
+            // 买平昨：平掉空头昨仓，PnL = (空头均价 - 成交价) * 量 * 乘数
+            double avg = pos.short_avg_price.load();
             m_risk.UpdatePnl((avg - p->Price) * p->Volume * m_account.multiplier);
             pos.short_yd.fetch_add(-p->Volume);
         }
     } else {
         if (p->OffsetFlag == THOST_FTDC_OF_Open) {
-            // 卖开：增加空头今仓
+            // 卖开：增加空头今仓，更新空头加权均价
+            int old_vol = pos.short_td.load();
             pos.short_td.fetch_add(p->Volume);
+            int new_vol = pos.short_td.load();
+            if (new_vol > 0)
+                pos.short_avg_price.store(
+                    (pos.short_avg_price.load() * old_vol + p->Price * p->Volume) / new_vol);
         } else if (p->OffsetFlag == THOST_FTDC_OF_CloseToday) {
-            // 卖平今：减少多头今仓，计算平仓盈亏
+            // 卖平今：平掉多头今仓，PnL = (成交价 - 多头均价) * 量 * 乘数
             double avg = pos.long_avg_price.load();
             m_risk.UpdatePnl((p->Price - avg) * p->Volume * m_account.multiplier);
             pos.long_td.fetch_add(-p->Volume);
         } else {
-            // 卖平昨：减少多头昨仓，计算平仓盈亏
+            // 卖平昨：平掉多头昨仓，PnL = (成交价 - 多头均价) * 量 * 乘数
             double avg = pos.long_avg_price.load();
             m_risk.UpdatePnl((p->Price - avg) * p->Volume * m_account.multiplier);
             pos.long_yd.fetch_add(-p->Volume);
@@ -303,9 +308,9 @@ void TdEngine::OnRspOrderAction(CThostFtdcInputOrderActionField* p, CThostFtdcRs
 // 风控前置报单：七道风控检查 → 分配 OMS 槽位 → 预冻结保证金 → 发送限价单
 // 返回 order_ref，风控拦截或槽位满时返回空字符串
 std::string TdEngine::SendOrder(const char* inst, double price, char dir,
-                                 char offset, int vol) {
+                                 char offset, int vol, bool is_maker) {
     int net = GetNetLong(inst);
-    if (!m_risk.CheckOrder(inst, price, vol, net, dir)) return "";
+    if (!m_risk.CheckOrder(inst, price, vol, net, dir, is_maker)) return "";
 
     CThostFtdcInputOrderField req = {};
     strcpy(req.BrokerID,     m_broker.c_str());

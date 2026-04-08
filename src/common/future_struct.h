@@ -54,5 +54,6 @@ struct alignas(64) PositionMetrics {
     std::atomic<int32_t> short_td{0};     // 空头今仓
     std::atomic<int32_t> short_frozen{0}; // 空头冻结量
 
-    std::atomic<double> long_avg_price{0.0}; // 多头持仓均价
+    std::atomic<double> long_avg_price{0.0};  // 多头持仓均价
+    std::atomic<double> short_avg_price{0.0}; // 空头持仓均价
 };

@@ -9,7 +9,7 @@ RiskManager::RiskManager(const AccountMetrics& account,
 // 七道风控检查，全部使用 __builtin_expect 标注小概率拒绝分支
 // 编译器将通过路径放在 fall-through，减少 branch misprediction penalty
 bool RiskManager::CheckOrder(const char* inst, double price, int vol,
-                              int current_net_pos, char direction) {
+                              int current_net_pos, char direction, bool is_maker) {
     // 1. 日内亏损熔断：超过阈值后停止所有报单
     if (__builtin_expect(m_daily_loss.load(std::memory_order_relaxed) >= m_cfg.max_daily_loss, 0)) {
         LOG_ERROR("[Risk] 日内亏损熔断: %.2f >= %.2f，停止交易",
@@ -38,8 +38,9 @@ bool RiskManager::CheckOrder(const char* inst, double price, int vol,
         return false;
     }
 
-    // 5. 单合约挂单数上限
-    if (__builtin_expect(m_oms.GetActiveCountByInst(inst) >= m_cfg.max_active_per_inst, 0)) {
+    // 5. 单合约挂单数上限（做市撤单重报时跳过，旧槽位异步释放中）
+    if (!is_maker &&
+        __builtin_expect(m_oms.GetActiveCountByInst(inst) >= m_cfg.max_active_per_inst, 0)) {
         LOG_WARN("[Risk] %s 挂单数达上限(%d)", inst, m_cfg.max_active_per_inst);
         return false;
     }
@@ -59,28 +60,22 @@ bool RiskManager::CheckOrder(const char* inst, double price, int vol,
     return true;
 }
 
-// 滑动窗口撤单频率检查（O(1) 均摊）
-// 维护一个环形队列存撤单时间戳，sum 记录窗口内总数
-// 每次调用：先弹出超过 60 秒的旧记录，再检查 sum 是否超限，通过则压入当前时间戳
 bool RiskManager::CheckCancel() {
-    auto now_sec = (int)(std::chrono::duration_cast<std::chrono::seconds>(
+    int now_sec = (int)(std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
 
-    // 弹出队列头部超过 60 秒的旧记录，同时减少 sum
+    // 弹出队列头部超过 60 秒的过期记录
     while (m_cancel_head != m_cancel_tail &&
            now_sec - m_cancel_ts[m_cancel_head] >= 60) {
         m_cancel_head = (m_cancel_head + 1) & (CANCEL_BUF_SIZE - 1);
         --m_cancel_sum;
     }
 
-    // sum 就是当前滑动窗口内的撤单次数，O(1) 读取
     if (__builtin_expect(m_cancel_sum >= m_cfg.max_cancel_per_min, 0)) {
         LOG_WARN("[Risk] 撤单频率超限(%d次/分钟)", m_cfg.max_cancel_per_min);
         return false;
     }
 
-    // 压入当前时间戳（正常情况下 sum < max_cancel_per_min，不会溢出）
-    // 防御性检查：队列满时直接拒绝
     int next_tail = (m_cancel_tail + 1) & (CANCEL_BUF_SIZE - 1);
     if (__builtin_expect(next_tail == m_cancel_head, 0)) {
         LOG_ERROR("[Risk] 撤单队列溢出，拒绝撤单");
@@ -105,7 +100,7 @@ void RiskManager::UpdatePnl(double pnl_delta) {
                      std::memory_order_release, std::memory_order_relaxed));
         LOG_INFO("[Risk] 日内累计亏损: %.2f", new_val);
     }
-}
+} 
 
 // 每日开盘前重置所有风控计数器
 void RiskManager::DailyReset() {
