@@ -26,51 +26,64 @@ void Strategy::OnTick(int idx, const SlimTick& tick, uint64_t t1_tsc) {
     MmState& ms = m_state[idx];
     const char* inst = tick.instrument;
 
-    // 涨跌停时不报价
+    // 1. 基础检查：涨跌停不报价
     if (tick.last_price >= tick.upper_limit || tick.last_price <= tick.lower_limit)
         return;
 
-    // 用买一卖一中间价作为报价基准
+    // 2. 报价基准计算
     double  mid_price = (tick.bid[0] + tick.ask[0]) * 0.5;
     int64_t mid_int   = PriceUtil::ToInt(mid_price);
 
-    // 中间价没变则不撤单重报
-    if (LIKELY(mid_int == ms.last_mid)) return;
+    // 频率控制：中间价没变则不刷新，避免过度撤单
+    if (mid_int == ms.last_mid) return;
     ms.last_mid = mid_int;
 
-    // 撤掉旧的双边挂单（O(1) 槽位直接访问）
+    // 3. 撤掉该合约在 OMS 中的旧双边单
     CancelIfActive(ms.bid_slot);
     CancelIfActive(ms.ask_slot);
     ms.bid_slot = -1;
     ms.ask_slot = -1;
 
+    // 4. 获取当前实时净持仓（基于你今晚修好的 TdEngine 计数器）
     int net = m_td.GetNetLongByIdx(idx);
 
-    constexpr int64_t TICK_SIZE = 2000; // 0.2 点，股指期货最小变动价位
-    int64_t bid_int = PriceUtil::AddTick(mid_int, -m_spread_ticks, TICK_SIZE);
-    int64_t ask_int = PriceUtil::AddTick(mid_int,  m_spread_ticks, TICK_SIZE);
-    double  bid_px  = PriceUtil::ToDouble(bid_int);
-    double  ask_px  = PriceUtil::ToDouble(ask_int);
+    // 5. 库存风控与报价倾斜 (Inventory Skewing)
+    // 如果多头多，就稍微抬高卖价（容易成交）并压低买价（不容易成交）
+    int bid_offset = m_spread_ticks;
+    int ask_offset = m_spread_ticks;
 
-    // 净多头未达上限时挂 bid（is_maker=true 跳过单合约挂单数检查）
+    if (net > 0)      ask_offset -= 1; // 多头多，卖单往中间靠，诱导平仓
+    else if (net < 0) bid_offset -= 1; // 空头多，买单往中间靠，诱导平仓
+
+    constexpr int64_t TICK_SIZE = 200ULL; // 以实际合约为准，如 0.2
+    int64_t bid_int = PriceUtil::AddTick(mid_int, -bid_offset, TICK_SIZE);
+    int64_t ask_int = PriceUtil::AddTick(mid_int,  ask_offset, TICK_SIZE);
+
+    // 6. 发送 BID（买入）逻辑
     if (net < m_max_net_pos) {
-        std::string ref = m_td.SendOrder(inst, bid_px, THOST_FTDC_D_Buy,
-                                         THOST_FTDC_OF_Open, 1, true);
+        // 重要：如果当前有空头(net < 0)，买入动作必须是“平仓”
+        char offset = (net < 0) ? THOST_FTDC_OF_CloseToday : THOST_FTDC_OF_Open;
+        
+        double bid_px = PriceUtil::ToDouble(bid_int);
+        std::string ref = m_td.SendOrder(inst, bid_px, THOST_FTDC_D_Buy, offset, 1, true);
+        
         if (!ref.empty()) {
             ms.bid_slot = m_td.m_oms.DecodeIndexPublic(ref.c_str());
             m_lat_tick2order.Add(Tsc::ToNs(Tsc::Now() - t1_tsc));
-            LOG_INFO("[MM] %s BID %.2f slot=%d net=%d", inst, bid_px, ms.bid_slot, net);
         }
     }
 
-    // 净空头未达上限时挂 ask（is_maker=true 跳过单合约挂单数检查）
+    // 7. 发送 ASK（卖出）逻辑
     if (net > -m_max_net_pos) {
-        std::string ref = m_td.SendOrder(inst, ask_px, THOST_FTDC_D_Sell,
-                                         THOST_FTDC_OF_Open, 1, true);
+        // 重要：如果当前有多头(net > 0)，卖出动作必须是“平仓”
+        char offset = (net > 0) ? THOST_FTDC_OF_CloseToday : THOST_FTDC_OF_Open;
+
+        double ask_px = PriceUtil::ToDouble(ask_int);
+        std::string ref = m_td.SendOrder(inst, ask_px, THOST_FTDC_D_Sell, offset, 1, true);
+
         if (!ref.empty()) {
             ms.ask_slot = m_td.m_oms.DecodeIndexPublic(ref.c_str());
             m_lat_tick2order.Add(Tsc::ToNs(Tsc::Now() - t1_tsc));
-            LOG_INFO("[MM] %s ASK %.2f slot=%d net=%d", inst, ask_px, ms.ask_slot, net);
         }
     }
 }
